@@ -1,2 +1,2 @@
-# employee_attrition
+# Employee Attrition
 Employee attrition analysis using R
