@@ -1,0 +1,1323 @@
+---
+title: "Employee Attrition: data prepration and model implementation"
+output: 
+  html_notebook:
+    toc: yes
+---
+
+# Setup
+
+```{r}
+# remove all variables, objects and functions in the environment
+rm( list = ls() )
+
+# choose the cleaned dataset or the selected dataset
+selected = TRUE
+# selected = FALSE
+```
+
+# Data preparation
+
+## Dataset import
+
+```{r}
+if( selected )
+{
+  dataset <- read.csv( "data/employee_attrition_dataset_selected.csv" )
+} else
+{
+  dataset <- read.csv( "data/employee_attrition_dataset_cleaned.csv" )
+}
+dataset
+```
+
+## Dummy variables
+
+```{r}
+if( selected )
+{
+  features.binary_to_dummy <- c(
+                                  "Attrition",
+                                  "OverTime"
+                               )
+  
+} else
+{
+  features.binary_to_dummy <- c(
+                                  "Attrition",
+                                  "Gender",
+                                  "PerformanceRating",
+                                  "OverTime"
+                               )
+}
+  features.categorical_to_dummy <- c( 
+                                       "BusinessTravel",
+                                       "Education",
+                                       "EnvSatisfaction",
+                                       "JobInvolvement",
+                                       "JobLevel",
+                                       "JobSatisfaction",
+                                       "RelatSatisfaction",
+                                       "StockOptionLevel",
+                                       "WorkLifeBalance",
+                                       "Department",
+                                       "EducationField",
+                                       "JobRole",
+                                       "MaritalStatus"
+                                    )
+library( fastDummies )
+
+dataset.dummy <- dataset
+
+dataset.dummy <- dummy_cols(
+                 dataset.dummy, 
+                 select_columns = features.binary_to_dummy,
+                 remove_first_dummy = TRUE,
+                 remove_selected_columns = TRUE
+            )
+dataset.dummy <- dummy_cols(
+                 dataset.dummy, 
+                 select_columns = features.categorical_to_dummy,
+                 remove_selected_columns = TRUE
+            )
+dataset.dummy[ , ] <- lapply( dataset.dummy, as.numeric )
+colnames( dataset.dummy )[ colnames( dataset.dummy ) == "Attrition_Yes" ] <- "Attrition"
+head( dataset.dummy )
+```
+
+## min-max standardization
+
+```{r}
+min_max <- function( vec, new_min = 0, new_max = 1 )
+{
+  coefficient <- ( new_max - new_min ) / ( max( vec ) - min( vec ) )
+  return( coefficient * ( vec - min( vec ) ) + new_min )
+}
+
+dataset.minmax <- dataset.dummy
+for( col in colnames( dataset.dummy ) )
+{
+  dataset.minmax[ , col ] <- min_max( dataset.minmax[ , col ] ) 
+}
+
+head( dataset.minmax )
+```
+
+
+# Model implementation with k-fold cross validation
+```{r}
+# function which takes in input the confusion matrices of test and training sets and compute the performance measures.
+# it returns a dataframe containing the performance measures for the given model
+performanceMeasures <- function( cm.train, cm.test, model_name )
+{
+  ## performance on train set
+  tp_train <- cm.train$table[ 2, 2 ]
+  tn_train <- cm.train$table[ 1, 1 ]
+  fp_train <- cm.train$table[ 2, 1 ]
+  fn_train <- cm.train$table[ 1, 2 ]
+  
+  accuracy_train <- ( tp_train + tn_train ) / ( tp_train + tn_train + fp_train + fn_train ) 
+  sensitivity_train <- tp_train / ( tp_train + fn_train )
+  specificity_train <- tn_train / ( tn_train + fp_train )
+  precision_train <- tp_train / ( tp_train + fp_train )
+  beta <- 2
+  f_score_train <- ( beta^2 - 1 ) * ( precision_train * sensitivity_train ) / ( ( beta^2 * precision_train ) + sensitivity_train )
+  perf_df_train <- data.frame( 
+                      Accuracy = accuracy_train,
+                      Sensitivity = sensitivity_train,
+                      Specificity = specificity_train,
+                      Precision = precision_train,
+                      F_score = f_score_train
+                  )
+  
+  ## performance on test set
+  tp_test <- cm.test$table[ 2, 2 ]
+  tn_test <- cm.test$table[ 1, 1 ]
+  fp_test <- cm.test$table[ 2, 1 ]
+  fn_test <- cm.test$table[ 1, 2 ]
+  
+  accuracy_test <- ( tp_test + tn_test ) / ( tp_test + tn_test + fp_test + fn_test ) 
+  sensitivity_test <- tp_test / ( tp_test + fn_test )
+  specificity_test <- tn_test / ( tn_test + fp_test )
+  precision_test <- tp_test / ( tp_test + fp_test )
+  beta <- 2
+  f_score_test <- ( beta^2 - 1 ) * ( precision_test * sensitivity_test ) / ( ( beta^2 * precision_test ) + sensitivity_test )
+  perf_df_test <- data.frame( 
+                      Accuracy = accuracy_test,
+                      Sensitivity = sensitivity_test,
+                      Specificity = specificity_test,
+                      Precision = precision_test,
+                      F_score = f_score_test
+                  )
+  
+  # overall dataframe
+  perf_df <- as.data.frame( rbind( perf_df_train, perf_df_test ) )
+  set <- c( "Training", "Test")
+  perf_df <- cbind( Set = set, perf_df[, c( "Accuracy", "Sensitivity", "Specificity", "Precision", "F_score" ) ] )
+  return( perf_df )
+}
+```
+
+## Logistic Regression
+```{r}
+library( caret )
+
+# dataset
+lr.dataset <- dataset.minmax
+# folds
+k <- 5
+# samples per fold
+m <- as.integer( nrow( lr.dataset ) / k )
+
+# initialization of performance dataframe
+lr.perf_df <- data.frame()
+# initialization of lists (used inside the loop over the folds)
+lr.dataset.train <- vector( "list", k )
+lr.dataset.test <- vector( "list", k )
+lr.probabilities.train <- vector( "list", k )
+lr.probabilities.test <- vector( "list", k )
+lr.predictions.train <- vector( "list", k )
+lr.predictions.test <- vector( "list", k )
+lr.cm.train <- vector( "list", k )
+lr.cm.test <- vector( "list", k )
+lr.dataset.attrition <- vector( "list", k )
+
+# loop over the folds (k-fold cross validation)
+for( i in 1:k )
+{
+  # selecting fold indices
+  start <- ( i - 1 ) * m + 1
+  end <- ifelse( i == k, nrow( lr.dataset ), i * m )
+  sample <- !seq( 1, nrow( lr.dataset ) ) %in% seq( start, end )
+
+  # splitting train and test folds
+  dataset.train <- subset( lr.dataset, sample == TRUE )
+  dataset.test <- subset( lr.dataset, sample == FALSE )
+  lr.dataset.train[ i ] <- list( dataset.train )
+  lr.dataset.test[ i ] <- list( dataset.test )
+  
+  # creating list of test fold labels
+  lr.dataset.attrition[ i ] <- list( dataset.test$Attrition )
+  
+  # training the model
+  lr <- glm( 
+          Attrition ~ ., 
+          data = dataset.train, 
+          family = binomial( link = "logit" ) 
+          )
+
+  # predicting on the test set
+  probabilities.test <- predict( 
+                                lr, 
+                                newdata = dataset.test, 
+                                type = "response" 
+                                )
+  lr.probabilities.test[ i ] <- list( probabilities.test )
+  predictions.test <- ifelse( probabilities.test > .5, 1, 0 )
+  lr.predictions.test[ i ] <- list( predictions.test )
+  
+  # predicting on the training set
+  probabilities.train <- predict( 
+                                lr, 
+                                newdata = dataset.train, 
+                                type = "response" 
+                                )
+  lr.probabilities.train[ i ] <- list( probabilities.train )
+  predictions.train <- ifelse( probabilities.train > .5, 1, 0 )
+  lr.predictions.train[ i ] <- list( predictions.train )
+
+  # confusion matrix
+  cm.train <- confusionMatrix(
+                          as.factor( predictions.train ),
+                          reference = as.factor( dataset.train$Attrition ),
+                          positive = "1"
+                          )
+  lr.cm.train[ i ] <- list( cm.train ) 
+  
+  cm.test <- confusionMatrix(
+                          as.factor( predictions.test ),
+                          reference = as.factor( dataset.test$Attrition ),
+                          positive = "1"
+                          )
+  lr.cm.test[ i ] <- list( cm.test ) 
+
+  lr.perf_df <- as.data.frame( rbind( 
+                                lr.perf_df, 
+                                performanceMeasures( 
+                                            cm.train, 
+                                            cm.test, 
+                                            "Logistic Regression" 
+                                            ) 
+                                ) 
+                               )
+}
+  
+# create performance dataframe for the model
+lr.perf_df <- as.data.frame( cbind( 
+                                Model = rep( "Logistic Regression", 2 ), 
+                                aggregate( 
+                                    . ~ Set, 
+                                    data = lr.perf_df, 
+                                    FUN = mean 
+                                    ) 
+                                )
+                            )
+lr.perf_df
+
+library( Metrics )
+library( ROCR )
+
+# compute ROC and AUC for the model
+lr.predictions <- prediction( lr.probabilities.test, lr.dataset.attrition )
+lr.roc <- performance( lr.predictions, measure = "tpr", x.measure = "fpr" )
+plot(
+  lr.roc,
+  lty = 3,
+  lwd = 2,
+  main = "Logistic Regression ROC curve",
+  col = "grey"
+)
+plot(
+  lr.roc,
+  avg = "threshold",
+  lwd = 4,
+  add = TRUE
+)
+lr.auc <- performance( lr.predictions, "auc" )
+lr.auc <- as.numeric( lr.auc@y.values )
+
+# save the model
+lr.model <- list( 
+                        modelName = "Logistic Regression", 
+                        confusionMatrixTrain = lr.cm.train,  
+                        confusionMatrixTest = lr.cm.test, 
+                        predicitonTrain = lr.predictions.train, 
+                        predicitonTest = lr.predictions.test,
+                        performanceDataFrame = lr.perf_df
+                      )
+class( lr.model ) <- "LogisticRegression"
+```
+```{r}
+summary( lr )
+```
+
+## Classification Tree
+```{r}
+library( caret )
+library( rpart )
+library( rpart.plot )
+
+# dataset
+ct.dataset <- dataset
+
+# converting character features to factor
+features.character <- sapply(ct.dataset, class) == 'character'
+ct.dataset[ , features.character ] <- lapply( ct.dataset[ , features.character ], as.factor )
+
+# converting integer features to numeric
+features.integer <- sapply(ct.dataset, class) == 'integer'
+ct.dataset[ , features.integer ] <- lapply( ct.dataset[ , features.integer ], as.numeric )
+
+# folds
+k <- 5
+# samples per fold
+m <- as.integer( nrow( ct.dataset ) / k )
+
+# initialization of performance dataframe
+ct.perf_df <- data.frame()
+# initialization of lists (used inside the loop over the folds)
+ct.dataset.train <- vector( "list", k )
+ct.dataset.test <- vector( "list", k )
+ct.probabilities.train <- vector( "list", k )
+ct.probabilities.test <- vector( "list", k )
+ct.predictions.train <- vector( "list", k )
+ct.predictions.test <- vector( "list", k )
+ct.cm.train <- vector( "list", k )
+ct.cm.test <- vector( "list", k )
+ct.dataset.attrition <- vector( "list", k )
+
+# loop over the folds (k-fold cross validation)
+for( i in 1:k )
+{
+  # selecting fold indices
+  start <- ( i - 1 ) * m + 1
+  end <- ifelse( i == k, nrow( ct.dataset ), i * m )
+  sample <- !seq( 1, nrow( ct.dataset ) ) %in% seq( start, end )
+
+  # splitting train and test folds
+  dataset.train <- subset( ct.dataset, sample == TRUE )
+  dataset.test <- subset( ct.dataset, sample == FALSE )
+  ct.dataset.train[ i ] <- list( dataset.train )
+  ct.dataset.test[ i ] <- list( dataset.test )
+  
+  # creating list of test fold labels
+  dataset.test$Attrition <- ifelse( dataset.test$Attrition == "Yes", 1, 0 )
+  ct.dataset.attrition[ i ] <- list( dataset.test$Attrition )
+  
+  # building the tree
+  ct <- rpart( 
+            Attrition ~ ., 
+            data = dataset.train, 
+            method = "class" 
+            )
+
+  # predicting on the test set
+  predictions.test <- predict( 
+                            ct, 
+                            newdata = dataset.test, 
+                            type = "class" 
+                            )
+  predictions.test <- ifelse( predictions.test == "Yes", 1, 0 )
+  ct.predictions.test[ i ] <- list( predictions.test )
+  probabilities.test <- predict( 
+                            ct, 
+                            newdata = dataset.test, 
+                            type = "prob" 
+                            )
+  ct.probabilities.test[ i ] <- list( probabilities.test[ , 2 ] )
+
+  # predicting on the training set
+  predictions.train <- predict( 
+                            ct, 
+                            newdata = dataset.train, 
+                            type = "class" 
+                            )
+  predictions.train <- ifelse( predictions.train == "Yes", 1, 0 )
+  ct.predictions.train[ i ] <- list( predictions.train )
+  probabilities.train <- predict( 
+                            ct, 
+                            newdata = dataset.train, 
+                            type = "prob" 
+                            )
+  ct.probabilities.train[ i ] <- list( probabilities.train[ , 2 ] )
+
+  # confusion matrix
+  dataset.train$Attrition <- ifelse( dataset.train$Attrition == "Yes", 1, 0 )
+  cm.train <- confusionMatrix(
+                          as.factor( predictions.train ),
+                          reference = as.factor( dataset.train$Attrition ),
+                          positive = "1"
+                          )
+  ct.cm.train[ i ] <- list( cm.train ) 
+  
+  cm.test <- confusionMatrix(
+                          as.factor( predictions.test ),
+                          reference = as.factor( dataset.test$Attrition ),
+                          positive = "1"
+                          )
+  ct.cm.test[ i ] <- list( cm.test ) 
+
+  ct.perf_df <- as.data.frame( rbind( 
+                                ct.perf_df, 
+                                performanceMeasures( 
+                                            cm.train, 
+                                            cm.test, 
+                                            "Classification Tree" 
+                                            ) 
+                                ) 
+                               )
+}
+
+# create performance dataframe for the model
+ct.perf_df <- as.data.frame( cbind( 
+                                Model = rep( "Classification Tree", 2 ), 
+                                aggregate( 
+                                    . ~ Set, 
+                                    data = ct.perf_df, 
+                                    FUN = mean 
+                                    ) 
+                                )
+                            )
+ct.perf_df
+
+library( Metrics )
+library( ROCR )
+
+# compute ROC and AUC for the model
+ct.predictions <- prediction( ct.probabilities.test, ct.dataset.attrition )
+ct.roc <- performance( ct.predictions, measure = "tpr", x.measure = "fpr" )
+plot(
+  ct.roc,
+  lty = 3,
+  lwd = 2,
+  main = "Classification Trees ROC curve",
+  col = "grey"
+)
+plot(
+  ct.roc,
+  avg = "threshold",
+  lwd = 4,
+  add = TRUE
+)
+abline( 
+  a = 0,
+  b = 1,
+  lwd = 2,
+  lty = 2,
+  col = "grey"
+)
+ct.auc <- as.numeric( performance( ct.predictions, "auc" )@y.values )
+
+# save the model
+ct.model <- list( 
+                        modelName = "Classification Tree", 
+                        confusionMatrixTrain = ct.cm.train,  
+                        confusionMatrixTest = ct.cm.test, 
+                        predicitonTrain = ct.predictions.train, 
+                        predicitonTest = ct.predictions.test,
+                        performanceDataFrame = ct.perf_df
+                      )
+class( ct.model ) <- "ClassificationTree"
+
+rpart.plot( ct, main = "Classification tree", type = 5, fallen.leaves = FALSE, cex = .95 , extra = 7, roundint = FALSE, under = TRUE, faclen = -1)
+```
+
+## Random forest
+```{r}
+library( caret )
+library( randomForest )
+
+# dataset
+rf.dataset <- dataset
+
+# converting character features to factor
+features.character <- sapply(rf.dataset, class) == 'character'
+rf.dataset[ , features.character ] <- lapply( rf.dataset[ , features.character ], as.factor )
+
+# converting integer features to numeric
+features.integer <- sapply(rf.dataset, class) == 'integer'
+rf.dataset[ , features.integer ] <- lapply( rf.dataset[ , features.integer ], as.numeric )
+
+# folds
+k <- 5
+# samples per fold
+m <- as.integer( nrow( rf.dataset ) / k )
+
+# initialization of performance dataframe
+rf.perf_df <- data.frame()
+# initialization of lists (used inside the loop over the folds)
+rf.dataset.train <- vector( "list", k )
+rf.dataset.test <- vector( "list", k )
+rf.probabilities.train <- vector( "list", k )
+rf.probabilities.test <- vector( "list", k )
+rf.predictions.train <- vector( "list", k )
+rf.predictions.test <- vector( "list", k )
+rf.cm.train <- vector( "list", k )
+rf.cm.test <- vector( "list", k )
+rf.dataset.attrition <- vector( "list", k )
+
+# loop over the folds (k-fold cross validation)
+for( i in 1:k )
+{
+  # selecting fold indices
+  start <- ( i - 1 ) * m + 1
+  end <- ifelse( i == k, nrow( rf.dataset ), i * m )
+  sample <- !seq( 1, nrow( rf.dataset ) ) %in% seq( start, end )
+
+  # splitting train and test folds
+  dataset.train <- subset( rf.dataset, sample == TRUE )
+  dataset.test <- subset( rf.dataset, sample == FALSE )
+  rf.dataset.train[ i ] <- list( dataset.train )
+  rf.dataset.test[ i ] <- list( dataset.test )
+  
+  # creating list of test fold labels
+  dataset.test$Attrition <- ifelse( dataset.test$Attrition == "Yes", 1, 0 )
+  rf.dataset.attrition[ i ] <- list( dataset.test$Attrition )
+  
+  # training of the model
+  n_sampling <- nrow( dataset.train[ dataset.train$Attrition == "Yes", ] )
+  
+  rf <- randomForest( 
+              Attrition ~ ., 
+              data = dataset.train,
+              ntree = 400,
+              mtry = 4,
+              sampsize = c( n_sampling, n_sampling ),
+              importance = TRUE
+              )
+
+  # predicting on the test set
+  predictions.test <- predict(
+                            rf,
+                            newdata = dataset.test,
+                            type = "response"
+                            )
+  predictions.test <- ifelse( predictions.test == "Yes", 1, 0 )
+  rf.predictions.test[ i ] <- list( predictions.test )
+  probabilities.test <- predict( 
+                            rf, 
+                            newdata = dataset.test, 
+                            type = "prob" 
+                            )
+  rf.probabilities.test[ i ] <- list( probabilities.test[ , 2 ] )
+  
+
+  # predicting on the training set
+  predictions.train <- predict(
+                            rf,
+                            newdata = dataset.train,
+                            type = "response"
+                            )
+  predictions.train <- ifelse( predictions.train == "Yes", 1, 0 )
+  rf.predictions.train[ i ] <- list( predictions.train )
+  probabilities.train <- predict( 
+                            rf, 
+                            newdata = dataset.train, 
+                            type = "prob" 
+                            )
+  rf.probabilities.train[ i ] <- list( probabilities.train[ , 2 ] )
+
+  # confusion matrix
+  dataset.train$Attrition <- ifelse( dataset.train$Attrition == "Yes", 1, 0 )
+  cm.train <- confusionMatrix(
+                          as.factor( predictions.train ),
+                          reference = as.factor( dataset.train$Attrition ),
+                          positive = "1"
+                          )
+  rf.cm.train[ i ] <- list( cm.train )
+
+  cm.test <- confusionMatrix(
+                          as.factor( predictions.test ),
+                          reference = as.factor( dataset.test$Attrition ),
+                          positive = "1"
+                          )
+  rf.cm.test[ i ] <- list( cm.test )
+
+  rf.perf_df <- as.data.frame( rbind(
+                                rf.perf_df,
+                                performanceMeasures(
+                                            cm.train,
+                                            cm.test,
+                                            "Random Forest"
+                                            )
+                                )
+                               )
+}
+
+# create performance dataframe for the model
+rf.perf_df <- as.data.frame( cbind(
+                                Model = rep( "Random Forest", 2 ),
+                                aggregate(
+                                    . ~ Set,
+                                    data = rf.perf_df,
+                                    FUN = mean
+                                    )
+                                )
+                            )
+rf.perf_df
+
+library( Metrics )
+library( ROCR )
+
+# compute ROC and AUC for the model
+rf.predictions <- prediction( rf.probabilities.test, rf.dataset.attrition )
+rf.roc <- performance( rf.predictions, measure = "tpr", x.measure = "fpr" )
+plot(
+  rf.roc,
+  lty = 3,
+  lwd = 2,
+  main = "Random Forest ROC curve",
+  col = "grey"
+)
+plot(
+  rf.roc,
+  avg = "threshold",
+  lwd = 4,
+  add = TRUE
+)
+abline( 
+  a = 0,
+  b = 1,
+  lwd = 2,
+  lty = 2,
+  col = "grey"
+)
+rf.auc <- as.numeric( performance( rf.predictions, "auc" )@y.values )
+
+# save the model
+rf.model <- list( 
+                modelName = "Random Forest", 
+                confusionMatrixTrain = rf.cm.train,  
+                confusionMatrixTest = rf.cm.test, 
+                predicitonTrain = rf.predictions.train, 
+                predicitonTest = rf.predictions.test,
+                performanceDataFrame = rf.perf_df
+              )
+class( rf.model ) <- "RandomForest"
+
+rf
+```
+### Random Forest mtry tuning
+```{r}
+mtry <- tuneRF( rf.dataset[, -23 ], rf.dataset$Attrition, ntreeTry = 400, stepFactor = 1.5, improve = 0.001, trace = TRUE, plot = TRUE )
+best_mtry <- mtry[ mtry[ , 2 ] == min( mtry[ , 2 ] ), 1 ]
+print( mtry )
+print( best_mtry )
+```
+```{r}
+importance( rf )
+varImpPlot( rf, main = "Feature importance in Random Forest", pch = 20, cex = 0.5 )
+```
+```{r}
+md <- as.data.frame( cbind( importance( rf )[ , 3 ], importance( rf )[ , 4 ] ) )
+colnames( md ) <- c( "MeanDecreaseAccuracy", "MeanDecreaseGini" )
+
+md.ordered_mda <- md[ order( md$MeanDecreaseAccuracy ), ]
+md.ordered_mdg <- md[ order( md$MeanDecreaseGini ), ]
+```
+```{r}
+par( 
+  family = "serif",
+  font.main = 2,
+  font.lab = 2,
+  pty = "m"
+  )
+dotchart( 
+  md.ordered_mda$MeanDecreaseAccuracy, 
+  labels = row.names( md.ordered_mda ),
+  cex = 1.2, 
+  xlab = "MeanDecreaseAccuracy", 
+  main = "Importance by mean decrease in accuracy",
+  pch = 20
+  )
+
+dotchart( 
+  md.ordered_mdg$MeanDecreaseGini, 
+  labels = row.names( md.ordered_mdg ),
+  cex = 0.9, 
+  xlab = "MeanDecreaseGini", 
+  main = "Importance by mean decrease in Gini index" 
+  )
+```
+
+## Naive Bayes
+```{r}
+library( caret )
+library( e1071 )
+
+# dataset
+nb.dataset <- dataset.minmax
+
+# folds
+k <- 5
+# samples per fold
+m <- as.integer( nrow( nb.dataset ) / k )
+
+# initialization of performance dataframe
+nb.perf_df <- data.frame()
+# initialization of lists (used inside the loop over the folds)
+nb.dataset.train <- vector( "list", k )
+nb.dataset.test <- vector( "list", k )
+nb.probabilities.train <- vector( "list", k )
+nb.probabilities.test <- vector( "list", k )
+nb.predictions.train <- vector( "list", k )
+nb.predictions.test <- vector( "list", k )
+nb.cm.train <- vector( "list", k )
+nb.cm.test <- vector( "list", k )
+nb.dataset.attrition <- vector( "list", k )
+
+# loop over the folds (k-fold cross validation)
+for( i in 1:k )
+{
+  # selecting fold indices
+  start <- ( i - 1 ) * m + 1
+  end <- ifelse( i == k, nrow( nb.dataset ), i * m )
+  sample <- !seq( 1, nrow( nb.dataset ) ) %in% seq( start, end )
+
+  # splitting train and test folds
+  dataset.train <- subset( nb.dataset, sample == TRUE )
+  dataset.test <- subset( nb.dataset, sample == FALSE )
+  nb.dataset.train[ i ] <- list( dataset.train )
+  nb.dataset.test[ i ] <- list( dataset.test )
+  
+  # creating list of test fold labels
+  nb.dataset.attrition[ i ] <- list( dataset.test$Attrition )
+  
+  # training of the model
+  nb <- naiveBayes( 
+              Attrition ~ ., 
+              data = dataset.train 
+              )
+
+  # predicting on the test set
+  probabilities.test <- predict( 
+                            nb, 
+                            newdata = dataset.test, 
+                            type = "raw" 
+                            )
+  nb.probabilities.test[ i ] <- list( probabilities.test[ , 2 ] )
+  predictions.test <- predict( 
+                            nb, 
+                            newdata = dataset.test, 
+                            type = "class" 
+                            )
+  nb.predictions.test[ i ] <- list( predictions.test )
+  
+
+  # predicting on the training set
+  probabilities.train <- predict( 
+                            nb, 
+                            newdata = dataset.train, 
+                            type = "raw" 
+                            )
+  nb.probabilities.train[ i ] <- list( probabilities.train[ , 2 ] )
+  predictions.train <- predict( 
+                            nb, 
+                            newdata = dataset.train, 
+                            type = "class" 
+                            )
+  nb.predictions.train[ i ] <- list( predictions.train )
+
+  # confusion matrix
+  cm.train <- confusionMatrix(
+                          as.factor( predictions.train ),
+                          reference = as.factor( dataset.train$Attrition ),
+                          positive = "1"
+                          )
+  nb.cm.train[ i ] <- list( cm.train )
+
+  cm.test <- confusionMatrix(
+                          as.factor( predictions.test ),
+                          reference = as.factor( dataset.test$Attrition ),
+                          positive = "1"
+                          )
+  nb.cm.test[ i ] <- list( cm.test )
+
+  nb.perf_df <- as.data.frame( rbind(
+                                nb.perf_df,
+                                performanceMeasures(
+                                            cm.train,
+                                            cm.test,
+                                            "Naive Bayes"
+                                            )
+                                )
+                               )
+}
+
+# create performance dataframe for the model
+nb.perf_df <- as.data.frame( cbind(
+                                Model = rep( "Naive Bayes", 2 ),
+                                aggregate(
+                                    . ~ Set,
+                                    data = nb.perf_df,
+                                    FUN = mean
+                                    )
+                                )
+                            )
+nb.perf_df
+
+library( Metrics )
+library( ROCR )
+
+# compute ROC and AUC for the model
+nb.predictions <- prediction( nb.probabilities.test, nb.dataset.attrition )
+nb.roc <- performance( nb.predictions, measure = "tpr", x.measure = "fpr" )
+plot(
+  nb.roc,
+  lty = 3,
+  lwd = 2,
+  main = "Naive Bayes ROC curve",
+  col = "grey"
+)
+plot(
+  nb.roc,
+  avg = "threshold",
+  lwd = 4,
+  add = TRUE
+)
+abline( 
+  a = 0,
+  b = 1,
+  lwd = 2,
+  lty = 2,
+  col = "grey"
+)
+nb.auc <- as.numeric( performance( nb.predictions, "auc" )@y.values )
+
+# save the model
+nb.model <- list( 
+                modelName = "Naive Bayes", 
+                confusionMatrixTrain = nb.cm.train,  
+                confusionMatrixTest = nb.cm.test, 
+                predicitonTrain = nb.predictions.train, 
+                predicitonTest = nb.predictions.test,
+                performanceDataFrame = nb.perf_df
+              )
+class( nb.model ) <- "NaiveBayes"
+
+nb
+```
+
+## Neural Networks
+```{r}
+library( caret )
+library( neuralnet )
+
+# dataset
+nn.dataset <- dataset.minmax
+
+# folds
+k <- 5
+# samples per fold
+m <- as.integer( nrow( nn.dataset ) / k )
+
+# initialization of performance dataframe
+nn.perf_df <- data.frame()
+# initialization of lists (used inside the loop over the folds)
+nn.dataset.train <- vector( "list", k )
+nn.dataset.test <- vector( "list", k )
+nn.probabilities.train <- vector( "list", k )
+nn.probabilities.test <- vector( "list", k )
+nn.predictions.train <- vector( "list", k )
+nn.predictions.test <- vector( "list", k )
+nn.cm.train <- vector( "list", k )
+nn.cm.test <- vector( "list", k )
+nn.dataset.attrition <- vector( "list", k )
+
+# loop over the folds (k-fold cross validation)
+for( i in 1:k )
+{
+  # selecting fold indices
+  start <- ( i - 1 ) * m + 1
+  end <- ifelse( i == k, nrow( nn.dataset ), i * m )
+  sample <- !seq( 1, nrow( nn.dataset ) ) %in% seq( start, end )
+
+  # splitting train and test folds
+  dataset.train <- subset( nn.dataset, sample == TRUE )
+  dataset.test <- subset( nn.dataset, sample == FALSE )
+  names( dataset.train ) <- make.names( names( dataset.train ) )
+  names( dataset.test ) <- make.names( names( dataset.test ) )
+  nn.dataset.train[ i ] <- list( dataset.train )
+  nn.dataset.test[ i ] <- list( dataset.test )
+  
+  # creating list of test fold labels
+  nn.dataset.attrition[ i ] <- list( dataset.test$Attrition )
+  
+  # training of the model
+  nn <- neuralnet( 
+              Attrition ~ ., 
+              data = dataset.train, 
+              hidden = c( 20, 10, 2 ), 
+              act.fct = "logistic", 
+              linear.output = FALSE
+              )
+
+  # predicting on the test set
+  probabilities.test <- predict( 
+                            nn, 
+                            newdata = dataset.test
+                            )
+  nn.probabilities.test[ i ] <- list( probabilities.test[ , 1 ] )
+  predictions.test <- ifelse( probabilities.test > .5, 1, 0 )
+  nn.predictions.test[ i ] <- list( predictions.test )
+
+  # predicting on the train set
+  probabilities.train <- predict( 
+                            nn, 
+                            newdata = dataset.train
+                            )
+  nn.probabilities.train[ i ] <- list( probabilities.train[ , 1 ] )
+  predictions.train <- ifelse( probabilities.train > .5, 1, 0 )
+  nn.predictions.train[ i ] <- list( predictions.train )
+
+  # confusion matrix
+  cm.train <- confusionMatrix(
+                          as.factor( predictions.train ),
+                          reference = as.factor( dataset.train$Attrition ),
+                          positive = "1"
+                          )
+  nn.cm.train[ i ] <- list( cm.train )
+
+  cm.test <- confusionMatrix(
+                          as.factor( predictions.test ),
+                          reference = as.factor( dataset.test$Attrition ),
+                          positive = "1"
+                          )
+  nn.cm.test[ i ] <- list( cm.test )
+
+  nn.perf_df <- as.data.frame( rbind(
+                                nn.perf_df,
+                                performanceMeasures(
+                                            cm.train,
+                                            cm.test,
+                                            "Neural Network"
+                                            )
+                                )
+                               )
+}
+
+# create performance dataframe for the model
+nn.perf_df <- as.data.frame( cbind(
+                                Model = rep( "Neural Network", 2 ),
+                                aggregate(
+                                    . ~ Set,
+                                    data = nn.perf_df,
+                                    FUN = mean
+                                    )
+                                )
+                            )
+nn.perf_df
+
+library( Metrics )
+library( ROCR )
+
+# compute ROC and AUC for the model
+nn.predictions <- ROCR::prediction( nn.probabilities.test, nn.dataset.attrition )
+nn.roc <- performance( nn.predictions, measure = "tpr", x.measure = "fpr" )
+plot(
+  nn.roc,
+  lty = 3,
+  lwd = 2,
+  main = "Neural Network ROC curve",
+  col = "grey"
+)
+plot(
+  nn.roc,
+  avg = "threshold",
+  lwd = 4,
+  add = TRUE
+)
+abline(
+  a = 0,
+  b = 1,
+  lwd = 2,
+  lty = 2,
+  col = "grey"
+)
+nn.auc <- as.numeric( performance( nn.predictions, "auc" )@y.values )
+
+# save the model
+nn.model <- list( 
+                modelName = "Neural Network", 
+                confusionMatrixTrain = nn.cm.train,  
+                confusionMatrixTest = nn.cm.test, 
+                predicitonTrain = nn.predictions.train, 
+                predicitonTest = nn.predictions.test,
+                performanceDataFrame = nn.perf_df
+              )
+class( nn.model ) <- "NeuralNetwork"
+
+# nn
+```
+
+# Results
+```{r}
+library( reshape2 )
+
+performances_df <- rbind( lr.perf_df, ct.perf_df, rf.perf_df, nb.perf_df, nn.perf_df )
+performances_df
+
+# plot performance on test
+p <- ggplot ( 
+    data = melt( performances_df[ performances_df$Set == "Test", ], id.vars = c( "Model", "Set" ) ),
+    aes( 
+      x = variable,
+      y = value,
+      fill = Model, 
+    )
+  ) +
+  geom_bar(
+    stat = "identity",
+    position = position_dodge2( 
+      padding = .0 
+    ),
+    color = "black",
+    alpha = .9
+  ) +
+  labs(
+    title = "Performance measures on test set",
+    x = "Performance measure",
+    y = "Value"
+  ) +
+  theme(
+    legend.position = "top",
+    legend.title = element_blank(),
+    panel.background = element_rect(
+      fill = "#F9F9F9",
+      color = "#090909",
+    ),
+    panel.grid.major = element_line(
+      color = "#EEEEEE",
+    ),
+    panel.grid.minor = element_line(
+      color = "#EEEEEE",
+    ),
+    text = element_text(
+      family = "serif",
+    ),
+    axis.text = element_text(
+      face = "bold",
+      size = 16
+    ),
+    axis.title = element_text(
+      face = "bold",
+      size = 22,
+    ),
+    axis.title.x = element_text(
+      margin = ggplot2::margin( 1, 0, 0, 0, "cm" ),
+    ),
+    axis.title.y = element_text(
+      margin = ggplot2::margin( 0, 1, 0, 0, "cm" ),
+    ),
+    plot.title = element_text(
+      face = "bold",
+      size = 28,
+      hjust = 0.5,
+      margin = ggplot2::margin( 0, 0, 1, 0, "cm" ),
+    ),
+    legend.text = element_text(
+      size = 18,
+    ),
+    legend.key = element_rect(
+      fill = "#F9F9F9",
+    ),
+    legend.key.size = unit( 0.7, "cm" ),
+    legend.justification = "center",
+    plot.margin = ggplot2::margin( 1, 3.5, 1, 1, "cm" ),
+  )
+ggsave( 
+  "plot/results/performances_test.png", 
+  width = 28, 
+  height = 28, 
+  units = "cm", 
+  dpi = 320 
+)
+p
+
+# plot performances on train
+p <- ggplot ( 
+    data = melt( performances_df[ performances_df$Set == "Training", ], id.vars = c( "Model", "Set" ) ),
+    aes( 
+      x = variable,
+      y = value,
+      fill = Model, 
+    )
+  ) +
+  geom_bar(
+    stat = "identity",
+    position = position_dodge2( 
+      padding = .0 
+    ),
+    color = "black",
+    alpha = .9
+  ) +
+  labs(
+    title = "Performance measures on training set",
+    x = "Performance measure",
+    y = "Value"
+  ) +
+  theme(
+    legend.position = "top",
+    legend.title = element_blank(),
+    panel.background = element_rect(
+      fill = "#F9F9F9",
+      color = "#090909",
+    ),
+    panel.grid.major = element_line(
+      color = "#EEEEEE",
+    ),
+    panel.grid.minor = element_line(
+      color = "#EEEEEE",
+    ),
+    text = element_text(
+      family = "serif",
+    ),
+    axis.text = element_text(
+      face = "bold",
+      size = 16
+    ),
+    axis.title = element_text(
+      face = "bold",
+      size = 22,
+    ),
+    axis.title.x = element_text(
+      margin = ggplot2::margin( 1, 0, 0, 0, "cm" ),
+    ),
+    axis.title.y = element_text(
+      margin = ggplot2::margin( 0, 1, 0, 0, "cm" ),
+    ),
+    plot.title = element_text(
+      face = "bold",
+      size = 28,
+      hjust = 0.5,
+      margin = ggplot2::margin( 0, 0, 1, 0, "cm" ),
+    ),
+    legend.text = element_text(
+      size = 18,
+    ),
+    legend.key = element_rect(
+      fill = "#F9F9F9",
+    ),
+    legend.key.size = unit( 0.7, "cm" ),
+    legend.justification = "center",
+    plot.margin = ggplot2::margin( 1, 3.5, 1, 1, "cm" ),
+  )
+ggsave( 
+  "plot/results/performances_train.png", 
+  width = 28, 
+  height = 28, 
+  units = "cm", 
+  dpi = 320 
+)
+p
+```
+
+The ROC object contains the x-values and the y-values of each cross-validation fold.
+For each ROC object the x-values and the y-values are k lists (with k being the number of folds) of lists possibly containing a different number of elements. Considering k as rows we have to compute the mean of each column and use those values to plot the average ROC curve.
+
+For instance:
+
+fold 1)       a1 a2 a3 a4 a5 a6 a7 X  X
+fold 2)       b1 b2 b3 b4 b5 X  X  X  X
+fold 3)       c1 c2 c3 c4 c5 c6 c7 c8 c9
+fold 4)       d1 d2 d3 X  X  X  X  X  X
+
+result)       m1 m2 m3 m4 m5 m6 m7 m8 m9
+
+Where: 
+  - m1 = (a1 + b1 + c1 + d1) / 4
+  - m2 = (a2 + b2 + c2 + d2) / 4
+  - m3 = (a3 + b3 + c3 + d3) / 4
+  - m4 = (a4 + b4 + c4) / 3
+  - m5 = (a5 + b5 + c5) / 3
+  - m6 = (a6 + c6) / 2
+  - m7 = (a7 + c7) / 2
+  - m8 = (c8) / 1
+  - m9 = (c9) / 1
+```{r}
+
+averageROC <- function( roc, model.name )
+{
+  roc.x <- roc@x.values
+  roc.y <- roc@y.values
+  
+  # getting the index of the fold list containing the maximum number of elements
+  idx_max <- which.max( lengths( roc.x ) )
+  # getting the length of the list with less number of elements
+  min_length <- min( lengths( roc.x ) )
+  # vector which will contain the mean of the x-values
+  x.means <- c()
+  # vector which will contain the mean of the y-values
+  y.means <- c()
+  
+  # loop over the columns (maximum number of columns)
+  for( i in 1:length( unlist( roc.x[ idx_max ] ) ) )
+  {
+    # initialize variables to compute the means
+    vec.x <- c()
+    vec.y <- c()
+    # loop over the rows (number of folds)
+    for( j in 1:length( roc.x ) )
+    {
+      # this if branch covers the padding (X)
+      if( i > min_length )
+      {
+        if( length( unlist( roc.x[ j ] ) ) >= i )
+        {
+          vec.x <- c( vec.x, unlist( roc.x[ j ] )[ i ] ) 
+          vec.y <- c( vec.y, unlist( roc.y[ j ] )[ i ] )
+        }
+      }
+      # this branch covers the other cases
+      else
+      {
+        vec.x <- c( vec.x, unlist( roc.x[ j ] )[ i ] ) 
+        vec.y <- c( vec.y, unlist( roc.y[ j ] )[ i ] )
+      }
+    }
+    x.means <- c( x.means, mean( vec.x ) )
+    y.means <- c( y.means, mean( vec.y ) )
+  }
+  
+  return( data.frame( model = model.name, x = x.means, y = y.means ) )
+}
+
+rocs_df <- data.frame()
+rocs_df <- rbind( rocs_df, averageROC( nn.roc, paste( "Neural Network\nArea =", round( mean( nn.auc ), 2 ) ) ) )
+rocs_df <- rbind( rocs_df, averageROC( nb.roc, paste( "Naive Bayes\nArea =", round( mean( nb.auc ), 2 ) ) ) )
+rocs_df <- rbind( rocs_df, averageROC( rf.roc, paste( "Random Forest\nArea =", round( mean( rf.auc ), 2 ) ) ) )
+rocs_df <- rbind( rocs_df, averageROC( ct.roc, paste( "Classification Tree\nArea =", round( mean( ct.auc ), 2 ) ) ) )
+rocs_df <- rbind( rocs_df, averageROC( lr.roc, paste( "Logistic Regression\nArea =", round( mean( lr.auc ), 2 ) ) ) )
+
+# plot roc curves
+p <- ggplot(
+    data = rocs_df,
+    aes(
+      x = x,
+      y = y,
+      color = model,
+    )
+  ) +
+  geom_line(
+    size = 1.8
+  ) +
+  geom_abline(
+    slope = 1,
+    intercept = 0,
+    linetype = "dashed",
+    color = "#A5A5A5",
+    size = 1.
+  ) +
+  labs( 
+    title = "ROC curves",
+    x = "False positive rate (fpr)",
+    y = "True positive rate (tpr)"
+  ) +
+  theme(
+    legend.position = "top",
+    legend.title = element_blank(),
+    panel.background = element_rect(
+      fill = "#F9F9F9",
+      color = "#090909",
+    ),
+    panel.grid.major = element_line(
+      color = "#EEEEEE",
+    ),
+    panel.grid.minor = element_line(
+      color = "#EEEEEE",
+    ),
+    text = element_text(
+      family = "serif",
+    ),
+    axis.text = element_text(
+      face = "bold",
+      size = 16
+    ),
+    axis.title = element_text(
+      face = "bold",
+      size = 22,
+    ),
+    axis.title.x = element_text(
+      margin = ggplot2::margin( 1, 0, 0, 0, "cm" ),
+    ),
+    axis.title.y = element_text(
+      margin = ggplot2::margin( 0, 1, 0, 0, "cm" ),
+    ),
+    plot.title = element_text(
+      face = "bold",
+      size = 28,
+      hjust = 0.5,
+      margin = ggplot2::margin( 0, 0, 1, 0, "cm" ),
+    ),
+    legend.text = element_text(
+      size = 18,
+    ),
+    legend.key = element_rect(
+      fill = "#F9F9F9",
+    ),
+    legend.key.size = unit( 0.7, "cm" ),
+    legend.justification = "center",
+    plot.margin = ggplot2::margin( 1, 3.5, 1, 1, "cm" ),
+  )
+ggsave( 
+  "plot/results/roc.png", 
+  width = 28, 
+  height = 28, 
+  units = "cm", 
+  dpi = 320 
+)
+p
+
+```
+
+

@@ -1,0 +1,1120 @@
+---
+title: "Employee Attrition: data exploration and visualization"
+output: 
+  html_notebook:
+    toc: yes
+---
+# Setup
+```{r}
+rm( list = ls() )
+```
+
+# Libraries import
+```{r}
+library( ggplot2 )
+library( reshape2 )
+library( e1071 )
+library( dplyr )
+```
+
+# Dataset import
+```{r}
+dataset.original <- read.csv( "data/employee_attrition_dataset.csv" )
+dataset.original
+```
+
+# Dataset summary
+```{r}
+cat( "N. of rows:", nrow( dataset.original ), "\n" )
+cat( "N. of cols:", ncol( dataset.original ), "\n" )
+cols <- colnames( dataset.original )
+cols
+```
+
+## Check imbalance in the target variable
+```{r}
+counts.attrition <- data.frame( table( dataset.original$Attrition ) )
+colnames( counts.attrition ) = c( "Attrition", "Count" )
+
+p <- ggplot( 
+    data = counts.attrition, 
+    aes( 
+      x = Attrition, 
+      y = Count / sum( Count ) 
+    ) 
+  ) +
+  geom_bar( 
+    stat = "identity", 
+    aes( 
+      fill = Attrition 
+    ),
+    colour = "black"
+  ) +
+  ggtitle( "Attrition distribution" ) + ylab( "Percentage" ) +
+  theme( 
+    panel.background = element_rect(
+      fill = "#F9F9F9",
+    ),
+    panel.grid.major.x = element_line(
+      color = "#DDDDDD",
+    ),
+    panel.grid.major.y = element_line(
+      color = "#DDDDDD",
+    ),
+    text = element_text(
+      family = "serif",
+    ),
+    axis.text = element_text( 
+      face = "bold", 
+      size = 14 
+    ), 
+    axis.ticks.x = element_blank( ),
+    axis.title = element_text( 
+      face = "bold", 
+      size = 16 
+    ), 
+    plot.title = element_text( 
+      face = "bold", 
+      size = 18,
+      hjust = 0.5 
+    ),
+    legend.title = element_text( 
+      face = "bold", 
+      size = 16 
+    ),
+    legend.text = element_text( 
+      size = 14 
+    ),
+    legend.spacing.y = unit( 0.5, 'cm' ) 
+  ) +
+  scale_y_continuous( 
+    labels = scales::percent 
+  )
+ggsave("plot/univariate/barplot_Attrition.png", width = 15, height = 12, units = "cm", dpi = 320 )
+p
+```
+
+
+## Useless features
+```{r}
+features.useless <- c( "Over18", "EmployeeCount", "EmployeeNumber", "StandardHours" )
+```
+* `Over18`: every observation has value "Yes"
+* `EmployeeCount`: every observation has value "1"
+* `StandardHours`: every observation has value "80"
+* `EmployeeNumber`: each observation has a different value which represents the ID
+
+Those features bring no information.
+
+## (Apparently) no-meaning features
+```{r}
+features.nomeaning <- c( "HourlyRate", "DailyRate", "MonthlyRate" )
+```
+* `HourlyRate`
+* `DailyRate`
+* `MonthlyRate`
+
+Apparently, they have no meaning: dividing the `MonthlyRate` for the `DailyRate` we get values that ranges from 
+```{r}
+monthly_over_daily <- dataset.original$MonthlyRate / dataset.original$DailyRate
+cat( "[", min( monthly_over_daily ), "-", max( monthly_over_daily ), "]\n" )
+```
+while, instead, one would expect values which cannot be more than 30 (days in a month).
+Dividing the `DailyRate` for the `HourlyRate` we get values that ranges from
+```{r}
+daily_over_hourly <- dataset.original$DailyRate / dataset.original$HourlyRate
+cat( "[", min( daily_over_hourly ), "-", max( daily_over_hourly ), "]\n" )
+```
+while, instead, one would expect values which cannot be more than 24 (hours in a day).
+
+## Checking for missing values
+```{r}
+ifelse( nrow( dataset.original ) != length( complete.cases( dataset.original ) ), "Missing values", "No missing values" )
+```
+No missing values.
+
+# Cleaned dataset
+The dataset with the removed features is built for following usage.
+```{r}
+features.cleaned <- cols[ !cols %in% c( features.nomeaning, features.useless ) ]
+dataset.cleaned <- dataset.original[ features.cleaned ]
+dataset.cleaned
+```
+
+# Univariate analysis
+## Numerical features
+* `Age`
+* `DistanceFromHome`
+* `MonthlyIncome`
+* `NumCompaniesWorked`
+* `PercentSalaryHike`
+* `TotalWorkingYears`
+* `TrainingTimesLastYear`
+* `YearsAtCompany`
+* `YearsInCurrentRole`
+* `YearsSinceLastPromotion`
+* `YearsWithCurrManager`
+
+```{r}
+features.numerical <- c( "Age", 
+                         "DistanceFromHome",
+                         "MonthlyIncome",
+                         "NumCompaniesWorked",
+                         "PercentSalaryHike",
+                         "TotalWorkingYears",
+                         "TrainingTimesLastYear",
+                         "YearsAtCompany",
+                         "YearsInCurrentRole",
+                         "YearsSinceLastPromotion",
+                         "YearsWithCurrManager",
+                         "Attrition" )
+# selection of the numerical features to build the numerical dataset
+dataset.numerical <- dataset.cleaned[ features.numerical ]
+dataset.numerical
+```
+
+### Statistics of numerical features
+```{r}
+summary( dataset.numerical[ -12 ] )
+```
+
+### Boxplots of numerical features
+```{r}
+# the dataset is first melt in order to be processed by the ggplot function below
+dataset.numerical.melt <- melt( dataset.numerical, id.vars = "Attrition" )
+dataset.numerical.melt
+```
+
+```{r}
+# to build this kind of plot a melted dataset is needed
+p <- ggplot(
+    data = dataset.numerical.melt, 
+    aes( 
+      x = variable, 
+      y = value, 
+      fill = variable 
+    ) 
+  ) + 
+  stat_boxplot( 
+    geom ='errorbar', 
+    width = 0.5
+  ) +
+  geom_boxplot( 
+    width = 0.5
+  ) +
+  coord_flip() +
+  facet_wrap( 
+    ~ variable, 
+    scales = "free",
+    ncol = 2,
+  ) +
+  ylab( "" ) +
+  xlab( "" ) +
+  ggtitle( "Boxplots of numerical features" ) +
+  theme(
+    panel.background = element_rect(
+      fill = "#F9F9F9",
+      color = "#090909",
+    ),
+    panel.grid.major.x = element_line(
+      color = "#DDDDDD",
+    ),
+    strip.background = element_rect(
+      fill = "#E9E9E9",
+      color = "#090909",
+    ),
+    text = element_text(
+      family = "serif",
+    ),
+    strip.text = element_text(
+      face = "bold",
+      family = "mono",
+      size = 20
+    ),
+    axis.text = element_text(
+      face = "bold",
+      size = 16
+    ),
+    axis.text.y = element_blank(),
+    axis.ticks.y = element_blank(),
+    axis.title = element_text(
+      face = "bold",
+      size = 22,
+    ),
+    axis.title.y = element_blank(),
+    plot.title = element_text(
+      face = "bold",
+      size = 28,
+      hjust = 0.5,
+      margin = margin( 0, 0, 1, 0, "cm" ),
+    ),
+    legend.position = "none",
+    plot.margin = margin( 1, 1, 0, 1, "cm" ),
+  )
+ggsave( 
+  "plot/univariate/boxplot_numerical.png", 
+  width = 25, 
+  height = 38, 
+  units = "cm", 
+  dpi = 320 
+)
+
+# the saved plot can be viewed in "plot/univariate/boxplot_numerical.png"
+```
+The boxplots show the distribution of the numerical variables of the dataset under analysis. The presence of outliers, highlighted by the black dots in each of the boxplot, may be considered as errors during the data collection phase, and for this reasons should be eliminated form the dataset. However, being the dataset fictionally created it is reasonable to suppose that those outliers are actually important for the development of the model and should, instead, be left as training examples in order to let the model learn from them as well.
+
+### Density curves and histograms
+```{r}
+# as for the previous case a melted dataframe is necessary to build this kind of plot
+p <- ggplot(
+    data = dataset.numerical.melt, 
+    aes(
+      x = value,
+      group = variable,
+      fill = variable
+    ) 
+  ) + 
+  geom_histogram(
+    aes( y = ..density.. ),
+    bins = 10
+  ) +
+  geom_density( 
+    adjust = 1.5,
+    alpha = 0.5,
+    size = 1
+  ) +
+  geom_vline(
+    data = aggregate(
+      dataset.numerical.melt[ 3 ],
+      dataset.numerical.melt[ 2 ],
+      median
+    ),
+    aes(
+      xintercept = value,
+    ),
+    size = 1,
+    linetype = "dashed"
+  ) +
+  facet_wrap( 
+    ~variable,
+    scales = "free",
+    ncol = 2,
+  ) +
+  ylab( "" ) +
+  xlab( "" ) +
+  ggtitle( "Densities and histograms of numerical features" ) +
+  theme( 
+    panel.background = element_rect(
+      fill = "#F9F9F9",
+      color = "#090909",
+    ),
+    panel.grid.major.x = element_line(
+      color = "#DDDDDD",
+    ),
+    strip.background = element_rect(
+      fill = "#E9E9E9",
+      color = "#090909",
+    ),
+    text = element_text(
+      family = "serif",
+    ),
+    strip.text = element_text( 
+      face = "bold", 
+      family = "mono",
+      size = 20
+    ),
+    axis.text = element_text(
+      face = "bold", 
+      size = 16
+    ),
+    axis.text.y = element_blank(),
+    axis.ticks.y = element_blank(),
+    axis.title = element_text(
+      face = "bold",
+      size = 22,
+    ),
+    plot.title = element_text( 
+      face = "bold", 
+      size = 28, 
+      hjust = 0.5,
+      margin = margin( 0, 0, 1, 0, "cm" ),
+    ), 
+    legend.position = "none",
+    plot.margin = margin( 1, 1.5, 0, .5, "cm" ),
+  )
+ggsave(
+  "plot/univariate/densities_numerical.png", 
+  width = 25, 
+  height = 38, 
+  units = "cm", 
+  dpi = 320 
+)
+
+# the saved plot can be viewed in "plot/univariate/densities_numerical.png"
+```
+
+### Skewness, kurtosis and statistics of numerical features
+```{r}
+# initialize the vectors
+mean.vec <- c()
+median.vec <- c()
+sd.vec <- c()
+skewness.vec <- c( )
+kurtosis.vec <- c( )
+
+# fill the vectors with the corresponding values of each numerical feature
+for( feature in colnames( dataset.numerical )[ -12 ] )
+{
+  mean.vec <- c( mean.vec, round( mean( dataset.numerical[ , feature ] ), 3 ) )
+  median.vec <- c( median.vec, round( median( dataset.numerical[ , feature ] ), 3 ) )
+  sd.vec <- c( sd.vec, round( sd( dataset.numerical[ , feature ] ), 3 ) )
+  skewness.vec <- c( skewness.vec, round( skewness( dataset.numerical[ , feature ] ), 3 ) )
+  kurtosis.vec <- c( kurtosis.vec, round( kurtosis( dataset.numerical[ , feature ] ), 3 ) )
+}
+
+# build the dataframe containing the statistics of the numerical features
+statistics.dataframe <- data.frame( 
+                              colnames( dataset.numerical )[ -12 ], 
+                              mean.vec, 
+                              median.vec, 
+                              sd.vec, 
+                              skewness.vec, 
+                              kurtosis.vec 
+                        )
+
+# rename the columns names
+colnames( statistics.dataframe ) <- c( "Feature", "Mean", "Median", "Standard Deviation", "Skewness", "Kurtosis" )
+```
+As we can see from the box plots and from the skewness, all the numerical variables are skewed to the right. The kurtosis index explains how close, the distribution under consideration, is to the Normal distribution. 
+
+All the variables have values greater than 0 (hypernormal), except for the `NumCompaniesWorked` variable, which has a kurtosis value close to 0 (perfectly normal), and for the `Age`, `DistanceFromHome` and `PercentSalaryHike` which have kurtosis index less than 0 (hyponormal).
+
+## Categorical features
+
+### Boolean Features
+* `OverTime`
+
+### Ordinal Features
+* `BusinessTravel`
+* `Education`
+* `EnvironmentSatisfaction`
+* `JobInvolvement`
+* `JobLevel`
+* `JobSatisfaction`
+* `PerformanceRating`
+* `RelationshipSatisfaction`
+* `StockOptionLevel`
+* `WorkLifeBalance`
+
+### Nominal Features
+* `Department`
+* `EducationField`
+* `Gender`
+* `JobRole`
+* `MaritalStatus`
+
+```{r}
+features.categorical.boolean <- c( "OverTime")
+features.categorical.ordinal <- c( "BusinessTravel",
+                                   "Education",
+                                   "EnvironmentSatisfaction",
+                                   "JobInvolvement",
+                                   "JobLevel",
+                                   "JobSatisfaction",
+                                   "PerformanceRating",
+                                   "RelationshipSatisfaction",
+                                   "StockOptionLevel",
+                                   "WorkLifeBalance")
+features.categorical.nominal <- c( "Department",
+                                   "EducationField",
+                                   "Gender",
+                                   "JobRole",
+                                   "MaritalStatus")
+
+# select the categorical columns from the cleaned dataset
+dataset.categorical <- dataset.cleaned[ c( features.categorical.boolean, features.categorical.ordinal, features.categorical.nominal, "Attrition") ]
+# each column is converted to be a factor
+dataset.categorical[ , ] <- lapply( dataset.categorical, factor )
+
+# rename some columns for plotting reasons
+colnames( dataset.categorical )[ colnames( dataset.categorical ) == "EnvironmentSatisfaction"] <- "EnvSatisfaction"
+colnames( dataset.categorical )[ colnames( dataset.categorical ) == "RelationshipSatisfaction"] <- "RelatSatisfaction"
+
+dataset.categorical
+```
+
+In the following, the values of the ordinal variables will be converted to characters. For instance, Education assumes values {1,2,3,4,5}, which will become {"Below College", "College", "Bachelor", "Master", "Doctor"}. Similarly for the other variables. Other changes will be done to the other variables in order to make them more readable during plotting.
+```{r}
+dataset.categorical$BusinessTravel <- factor( 
+  dataset.categorical$BusinessTravel, 
+  levels = c("Non-Travel","Travel_Rarely","Travel_Frequently"), 
+  labels = c( "Never", "Rarely", "Frequently" ) 
+)
+
+dataset.categorical$Education <- factor( 
+  dataset.categorical$Education, 
+  levels = c( 1, 2, 3, 4, 5 ), 
+  labels = c( "Below College", "College", "Bachelor", "Master", "Doctor" ) 
+)
+
+dataset.categorical$EnvSatisfaction <- factor( 
+  dataset.categorical$EnvSatisfaction, 
+  levels = c( 1, 2, 3, 4 ), 
+  labels = c( "Low", "Medium", "High", "Very High" ) 
+)
+
+dataset.categorical$JobSatisfaction <- factor( 
+  dataset.categorical$JobSatisfaction, 
+  levels = c( 1, 2, 3, 4 ), 
+  labels = c( "Low", "Medium", "High", "Very High" ) 
+)
+
+dataset.categorical$RelatSatisfaction <- factor( 
+  dataset.categorical$RelatSatisfaction, 
+  levels = c( 1, 2, 3, 4 ), 
+  labels = c( "Low", "Medium", "High", "Very High" ) 
+)
+
+dataset.categorical$JobInvolvement <- factor( 
+  dataset.categorical$JobInvolvement, 
+  levels = c( 1, 2, 3, 4 ), 
+  labels = c( "Low", "Medium", "High", "Very High" ) 
+)
+
+dataset.categorical$JobLevel <- factor( 
+  dataset.categorical$JobLevel, 
+  levels = c( 1, 2, 3, 4, 5 ), 
+  labels = c( "Entry", "Intermediate", "Experienced", "Advanced", "Expert" ) 
+)
+
+dataset.categorical$PerformanceRating <- factor( 
+  dataset.categorical$PerformanceRating, 
+  levels = c( 1, 2, 3, 4 ), 
+  labels = c( "Low", "Good", "Excellent", "Outstanding" ) 
+)
+
+dataset.categorical$StockOptionLevel <- factor( 
+  dataset.categorical$StockOptionLevel, 
+  levels = c( 0, 1, 2, 3 ), 
+  labels = c( "No stock", "Few stocks", "Medium stocks", "Many stocks" ) 
+)
+
+dataset.categorical$WorkLifeBalance <- factor( 
+  dataset.categorical$WorkLifeBalance, 
+  levels = c( 1, 2, 3, 4 ), 
+  labels = c( "Bad", "Good", "Better", "Best" ) 
+)
+
+dataset.categorical$Department <- factor( 
+  dataset.categorical$Department, 
+  levels = c( "Human Resources", "Research & Development", "Sales" ), 
+  labels = c( "HR", "R&D", "Sales" ) 
+)
+
+dataset.categorical$JobRole <- factor( 
+  dataset.categorical$JobRole, 
+  levels = c( "Healthcare Representative", "Human Resources", "Laboratory Technician", "Manager", "Manufacturing Director", "Research Director", "Research Scientist", "Sales Executive", "Sales Representative" ), 
+  labels = c( "Health. Repr.", "HR", "Lab. Tech.", "Manager", "Manuf. Dir.", "Res. Dir.", "Res. Sci.", "Sales Exe.", "Sales Repr." ) 
+)
+
+dataset.categorical$EducationField <- factor( 
+  dataset.categorical$EducationField, 
+  levels = c( "Human Resources", "Life Sciences", "Marketing", "Medical", "Other", "Technical Degree" ), 
+  labels = c( "HR", "Life Sciences", "Marketing", "Medical", "Other", "Technical" ) 
+)
+
+dataset.categorical
+```
+
+# Save cleaned dataset
+```{r}
+dataset.cleaned <- cbind( dataset.categorical[ -17 ], dataset.numerical )
+dataset.cleaned
+
+write.csv( dataset.cleaned, "data/employee_attrition_dataset_cleaned.csv", row.names = FALSE)
+```
+
+### Statistics of categorical features
+```{r}
+summary( dataset.categorical )
+```
+
+### Barplots of categorical features
+```{r}
+# as for the numerical case, the dataframe need to be melt in order to plot
+dataset.categorical.melted <- data.frame()
+dataset.categorical.melted.attrition <- data.frame()
+
+# the columns are reordered for plotting reasons
+indices <- c( 3, 13, 12, 2, 
+              5, 7, 1, 8, 
+              6, 4, 11, 10, 
+              15, 9, 14, 16 )
+
+# the melted dataframes are built (the last column - attrition - is not used)
+for( var in colnames( dataset.categorical )[ -17 ] )
+{
+  tmp_df <- as.data.frame( table( dataset.categorical[, var ] ) )
+  tmp_df_attr <- as.data.frame( table( dataset.categorical[, var ], dataset.categorical$Attrition ) )
+  tmp_df$Variable <- var
+  tmp_df_attr$Variable <- var
+  dataset.categorical.melted <- rbind( dataset.categorical.melted, tmp_df )
+  dataset.categorical.melted.attrition <- rbind( dataset.categorical.melted.attrition, tmp_df_attr )
+}
+
+# rename the columns
+colnames( dataset.categorical.melted ) <- c( "Value", "Count", "Variable" )
+colnames( dataset.categorical.melted.attrition ) <- c( "Value", "Attrition", "Count", "Variable" )
+
+# convert the variable column to be a factor
+dataset.categorical.melted$Variable <- factor( dataset.categorical.melted$Variable, levels = colnames( dataset.categorical )[ indices ] )
+dataset.categorical.melted.attrition$Variable <- factor( dataset.categorical.melted.attrition$Variable, levels = colnames( dataset.categorical )[ indices ] )
+
+dataset.categorical.melted
+dataset.categorical.melted.attrition
+```
+
+```{r}
+# plot the barplots of the categorical variables
+p <- ggplot( 
+    data = dataset.categorical.melted, 
+    aes( 
+      x = Value, 
+      y = Count, 
+      fill = Variable 
+    ) 
+  ) + 
+  geom_bar( 
+    stat = "identity", 
+    colour="black"
+  ) + 
+  facet_wrap( 
+    ~ Variable, 
+    scales = "free",
+    ncol = 4, 
+    ) + 
+  coord_flip() +
+  ggtitle( "Barplots of categorical features" ) + 
+  ylab( "" ) + 
+  xlab( "" ) + 
+  theme( 
+    panel.background = element_rect(
+      fill = "#F9F9F9",
+      color = "#090909",
+    ),
+    panel.grid.major.x = element_line(
+      color = "#DDDDDD",
+    ),
+    strip.background = element_rect(
+      fill = "#E9E9E9",
+      color = "#090909",
+    ),
+    text = element_text(
+      family = "serif",
+    ),
+    strip.text = element_text( 
+      face = "bold", 
+      family = "mono",
+      size = 18
+    ),
+    axis.text = element_text(
+      face = "bold", 
+      size = 16
+    ),
+    axis.title = element_text(
+      face = "bold",
+      size = 22,
+    ),
+    plot.title = element_text( 
+      face = "bold", 
+      size = 28, 
+      hjust = 0.5,
+      margin = margin( 0, 0, 1, 0, "cm" ),
+    ), 
+    legend.position = "none",
+    plot.margin = margin( 1, 1.5, 0, .5, "cm" ),
+  )
+ggsave(
+  "plot/univariate/barplot_categorical.png", 
+  width = 43, 
+  height = 40, 
+  units = "cm", 
+  dpi = 320 
+)
+
+# the saved plot can be viewed at "plot/univariate/barplot_categorical.png"
+```
+
+Most employees have a level of education of 3 ("Bachelor"), while very few have a level of 5 ("Doctor").
+In general, the majority of employees have a "high" or "very high" level of satisfaction not only with respect to the environment but also with respect to their work and relationships with colleagues.
+Almost all employees have a work-life balance that can be considered "better", although there are a large number of them who work overtime.
+In most instances the performance rating is 3 ("excellent"), except for rare cases that have better performance with a score of 4 ("outstanding").
+Employees mostly occupy jobs with levels of 1 or 2, with the remainder distributed among levels 3, 4, and 5 (in a decreasing fashion). In general, they are very involved in their work and make very little (if any) use of the stock level option.
+Finally, the gender distribution is slightly in favor of males.
+
+```{r}
+# function which computes the gini heterogeneity index (relative or not)
+HetGini <- function( vec, relative = FALSE )
+{
+  vec.table <- table( vec )
+  vec.freq <- prop.table( vec.table )
+  squared_vector <- c()
+  for( i in 1:nrow( vec.freq ) ) 
+  {
+    squared_vector <- cbind( squared_vector, vec.freq[ i ]^2 )
+  }
+  if( !relative )
+  {
+    return( 1 - sum( squared_vector ) )
+  }
+  else
+  {
+    if( nrow( vec.freq ) == 1 )
+    {
+      max_value = 1    
+    }
+    else
+    {
+      max_value = ( nrow( vec.freq ) - 1 ) / ( nrow( vec.freq ) )
+    }
+    return( ( 1 - sum( squared_vector ) ) / max_value )
+  }
+}
+
+# initialize the vectors
+gini_vec <- c()
+gini_rel_vec <- c()
+
+# fill the vectors for each categorical variable
+for( var in colnames( dataset.categorical ) )
+{
+  gini_vec <- c( gini_vec, HetGini( dataset.categorical[ , var ] ) )
+  gini_rel_vec <- c( gini_rel_vec, HetGini( dataset.categorical[ , var ], relative = TRUE ) )
+}
+
+# build the dataframe containing both the gini index and the relative one
+gini_df <- data.frame( colnames( dataset.categorical ), gini_vec, gini_rel_vec )
+
+# raname the columns
+colnames( gini_df ) <- c( "Variable", "GiniHetIdx", "GiniRelHetIdx" )
+
+# sorte the rows by gini relative index and gini index
+gini_df_sorted <- gini_df[ order( gini_df$GiniRelHetIdx, gini_df$GiniHetIdx, decreasing = FALSE ) , ]
+gini_df_sorted_variables <- gini_df_sorted$Variable
+gini_df_sorted$Variable <- factor( gini_df_sorted$Variable, levels = gini_df_sorted_variables )
+
+# melt the dataframe for plotting reasons
+gini_df_melt <- melt( gini_df_sorted[ , c( "Variable", "GiniHetIdx", "GiniRelHetIdx" ) ], id.vars = 1 )
+
+# rename the columns
+colnames( gini_df_melt ) <- c( "Variable", "Index", "Value" )
+```
+
+# Bivariate analysis
+Bivariate analysis is useful for comparing two different variables in order to find relationships between them. In the following, numerical variables will first be analyzed alone and the same will be done for the categorical ones. Finally, the two types of variables will also be considered together.
+
+## Numerical features
+### Boxplots of numerical features
+```{r}
+p <- ggplot( 
+    data = dataset.numerical.melt, 
+    aes( 
+      x = variable,
+      y = value, 
+      fill = Attrition 
+    ) 
+  ) +
+  stat_boxplot( 
+    geom ='errorbar', 
+    position = position_dodge( 
+      width = 1.2 
+    ) 
+  ) +
+  geom_boxplot( 
+    position = position_dodge( 
+      width = 1.2 
+    ) 
+  ) + 
+  coord_flip() +
+  facet_wrap( 
+    ~ variable, 
+    scales = "free", 
+    ncol = 2,
+  ) +  
+  xlab( "" ) + 
+  ylab( "" ) + 
+  ggtitle( "Boxplots of numerical features by attrition" ) + 
+  theme(
+    panel.background = element_rect(
+      fill = "#F9F9F9",
+      color = "#090909",
+    ),
+    panel.grid.major.x = element_line(
+      color = "#DDDDDD",
+    ),
+    strip.background = element_rect(
+      fill = "#E9E9E9",
+      color = "#090909",
+    ),
+    text = element_text(
+      family = "serif",
+    ),
+    strip.text = element_text( 
+      face = "bold",
+      family = "mono",
+      size = 20
+    ),
+    axis.text = element_text(
+      face = "bold", 
+      size = 16
+    ),
+    axis.text.y = element_blank(),
+    axis.ticks.y = element_blank(),
+    axis.title = element_text(
+      face = "bold", 
+      size = 22,
+    ),
+    axis.title.y = element_blank(),
+    plot.title = element_text( 
+      face = "bold", 
+      size = 28, 
+      hjust = 0.5,
+      margin = margin( 0, 0, 1, 0, "cm" ),
+    ), 
+    legend.title = element_text(
+      face = "bold",
+      size = 22
+    ),
+    legend.text = element_text(
+      size = 22
+    ),
+    legend.position = "top",
+    plot.margin = margin( 1, 1, 0, 1, "cm" ),
+  )
+ggsave(
+  "plot/bivariate/boxplot_numerical_vs_attrition.png", 
+  width = 25, 
+  height = 38, 
+  units = "cm", 
+  dpi = 320 
+)
+
+# the saved plot can be viewed at "plot/bivariate/boxplot_numerical_vs_attrition.png"
+```
+
+In the previous plot numerical variables are plotted against Attrition.
+We can see that some variables, such as `MonthlyIncome`, `Age`, `YearsAtCompany`, `TotalWorkingYears`, `YearsInCurrentRole` and `YearsWithCurrManager`, shows similar behavior in the sense that attrition seems to be present when the values of those variables is lower. On the other hand, an opposite behavior is shown by the `DistanceFromHome` variable, meaning that employees who live farther away from their workplace are more likely to quit than those who live closer.
+
+### Density curves and histograms of numerical features
+```{r}
+# compute the median of each numerical variable using the melted dataframe
+by_var_attr <- dataset.numerical.melt %>% group_by( variable, Attrition )
+aggr <- by_var_attr %>% summarize( value = median( value ) )
+
+# plotting
+p <- ggplot( 
+  data = dataset.numerical.melt, 
+  aes(
+    x = value,
+    group = Attrition,
+    fill = Attrition
+   ) 
+  ) + 
+  geom_histogram(
+    aes( y = ..density.. ),
+    bins = 10,
+    position = position_dodge2(
+      preserve = "single"
+    )
+  ) +
+  geom_density( 
+    adjust = 1.5,
+    alpha = 0.5,
+    size = 1
+  ) +
+  geom_vline(
+    data = aggr,
+    aes(
+      xintercept = value,
+      color = as.factor( Attrition )
+    ),
+    size = 1,
+    linetype = "dashed"
+  ) +
+  facet_wrap( 
+    ~variable,
+    scales = "free",
+    ncol = 2,
+  ) +
+  xlab( "" ) + 
+  ylab( "" ) + 
+  ggtitle( "Densities and histograms of numerical features by attrition" ) +
+  theme( 
+    panel.background = element_rect(
+      fill = "#F9F9F9",
+      color = "#090909",
+    ),
+    panel.grid.major.x = element_line(
+      color = "#DDDDDD",
+    ),
+    strip.background = element_rect(
+      fill = "#E9E9E9",
+      color = "#090909",
+    ),
+    text = element_text(
+      family = "serif",
+    ),
+    strip.text = element_text( 
+      face = "bold", 
+      family = "mono",
+      size = 20
+    ),
+    axis.text = element_text(
+      face = "bold", 
+      size = 16
+    ),
+    axis.text.y = element_blank(),
+    axis.ticks.y = element_blank(),
+    axis.title = element_text(
+      face = "bold",
+      size = 22,
+    ),
+    plot.title = element_text( 
+      face = "bold", 
+      size = 28, 
+      hjust = 0.5,
+      margin = margin( 0, 0, 1, 0, "cm" ),
+    ), 
+    legend.title = element_text(
+      face = "bold",
+      size = 22
+    ),
+    legend.text = element_text(
+      size = 22
+    ),
+    legend.position = "top",
+    plot.margin = margin( 1, 1.5, 0, .5, "cm" )
+  ) + 
+  guides(
+    color = FALSE
+  )
+ggsave(
+  "plot/bivariate/densities_numerical_vs_attrition.png", 
+  width = 25, 
+  height = 38, 
+  units = "cm", 
+  dpi = 320 
+)
+
+# the saved plot can be viewed at "plot/bivariate/densities_numerical_vs_attrition.png"
+```
+
+## Categorical features
+### Barplots of categorical features
+```{r}
+p <- ggplot( 
+    data = dataset.categorical.melted.attrition, 
+    aes( 
+      x = Value, 
+      y = Count, 
+      fill = Attrition 
+    ) 
+  ) + 
+  geom_bar( 
+    stat = "identity", 
+    position = "fill", 
+    colour = "black"
+  ) + 
+  facet_wrap( 
+    ~ Variable, 
+    scales = "free",
+    ncol = 4,  
+  ) + 
+  coord_flip() +
+  ggtitle( "Barplots of categorical features by attrition (proportion)" ) + 
+  ylab( "" ) + 
+  xlab( "" ) +
+  theme( 
+    panel.background = element_rect(
+      fill = "#F9F9F9",
+      color = "#090909",
+    ),
+    panel.grid.major.x = element_line(
+      color = "#DDDDDD",
+    ),
+    strip.background = element_rect(
+      fill = "#E9E9E9",
+      color = "#090909",
+    ),
+    text = element_text(
+      family = "serif",
+    ),
+    strip.text = element_text( 
+      face = "bold", 
+      family = "mono",
+      size = 18
+    ),
+    axis.text = element_text(
+      face = "bold", 
+      size = 16
+    ),
+    axis.title = element_text(
+      face = "bold",
+      size = 22,
+    ),
+    plot.title = element_text( 
+      face = "bold", 
+      size = 28, 
+      hjust = 0.5,
+      margin = margin( 0, 0, 1, 0, "cm" ),
+    ),
+    legend.title = element_text(
+      face = "bold",
+      size = 22
+    ),
+    legend.text = element_text(
+      size = 22
+    ),
+    legend.position = "top",
+    plot.margin = margin( 1, 1.5, 0, .5, "cm" ),
+  )
+ggsave( 
+  "plot/bivariate/barplot_categorical_vs_attrition.png",  
+  width = 43, 
+  height = 41, 
+  units = "cm", 
+  dpi = 320 
+)
+
+# the saved plot can be viewed at "plot/bivariate/barplot_categorical_vs_attrition.png"
+```
+
+The plot shows how attrition is distributed across the different categorical variables (ordinal and boolean). It is worth noting that some variables, such as `Gender` and `PerformanceRating` do not play any role in discriminating whether an employee will experience attrition or not.  On the other hand, it is clear that low levels of satisfaction not only in the environment but also in the job and in relationships with colleagues play an important role in this phenomenon.
+A similar behavior is shown by the `JobInvolvement` variable as well as the `WorkLifeBalance`, meaning that a low level of involvement in their own job or a low level of work-life balance drive the employees to attrition.
+Employees which tend to work over time or have a low level job, are more likely to quit.
+A low stock option level may also be one of the factor that pushes towards attrition. 
+
+
+# Multivariate Analysis
+
+Multivariate analysis is used to compare more than two variables at a time in order to find correlations between them
+
+## Correlation matrix
+```{r}
+# build a new dataframe in which the attrition variable attributes are converted to 1 or 0
+dataset.numerical.corr <- dataset.numerical
+dataset.numerical.corr$Attrition <- ifelse( dataset.numerical.corr$Attrition == "Yes", 1, 0 )
+
+# Get lower triangle of the correlation matrix
+get_lower_tri <- function( cormat )
+{
+  diag( cormat ) <- NA
+  cormat[ upper.tri( cormat ) ] <- NA
+  return( cormat )
+}
+
+# plotting the correlation matrix
+p <- ggplot(
+    data = melt( get_lower_tri( cor( dataset.numerical.corr ) ), na.rm = TRUE ),
+    aes(
+      x = Var1,
+      y = Var2,
+      fill = value
+    )
+  ) +
+  geom_tile(
+    color = "white"
+  ) +
+  scale_fill_gradient2(
+    low = "#6D9EC1",
+    high = "#E46726",
+    mid = "white",
+    midpoint = 0,
+    limit = c( -1, 1 ),
+    space = "Lab",
+    name = "Pearson Correlation"
+  ) +
+  geom_text(
+    aes(
+      Var1, 
+      Var2, 
+      label = round( value, 2 )
+    ), 
+    color = "black", 
+    size = 6.5,
+    family = "serif"
+  ) +
+  theme_minimal() +
+  ggtitle( "Correlation matrix of numerical features" ) +
+  theme(
+    text = element_text(
+      family = "serif",
+    ),
+    axis.text = element_text(
+      face = "bold",
+      size = 18
+    ),
+    plot.title = element_text(
+      face = "bold",
+      size = 28,
+      hjust = -0.8,
+      margin = margin( 0, 0, 1, 0, "cm" ),
+    ),
+    plot.margin = margin( 1, 1.5, 0, .5, "cm" ),
+    axis.text.x = element_text(
+      angle = 45,
+      vjust = 1,
+      hjust = 1
+    ),
+    axis.title.x = element_blank(),
+    axis.title.y = element_blank(),
+    panel.grid.major = element_blank(),
+    panel.border = element_blank(),
+    panel.background = element_blank(),
+    axis.ticks = element_blank(),
+    legend.position = c( 0.35, 0.9 ),
+    legend.direction = "horizontal",
+    legend.text = element_text(
+      size = 18,
+    ),
+    legend.title = element_text(
+      size = 20,
+    ),
+  ) +
+  guides(
+    fill = guide_colorbar(
+      barwidth = 15, 
+      barheight = 2,
+      title.position = "top", 
+      title.hjust = 0.5
+    )
+  ) +
+ coord_fixed()
+ggsave( 
+  "plot/multivariate/correlation_matrix.png", 
+  width = 28, 
+  height = 28, 
+  units = "cm", 
+  dpi = 320 
+)
+
+# the saved plot can be viewed at "plot/multivariate/correlation_matrix.png"
+```
+
+# Feature selection
+The feature which are not informative (after visualization and exploration analysis) are removed from the dataset
+```{r}
+features.toremove <- c( 
+                        "PerformanceRating", 
+                        "Gender", 
+                        "TrainingTimesLastYear", 
+                        "YearsSinceLastPromotion", 
+                        "PercentSalaryHike" 
+                      )
+cols <- colnames( dataset.cleaned )
+features.selected <- !cols %in% c( features.toremove )
+dataset.selected <- dataset.cleaned[ , features.selected ]
+
+write.csv( dataset.selected, "data/employee_attrition_dataset_selected.csv", row.names = FALSE)
+```
+```
